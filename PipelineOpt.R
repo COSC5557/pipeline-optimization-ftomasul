@@ -48,51 +48,72 @@ base_ranger = as_learner(impute %>>% base_encode %>>% lrn("classif.ranger", id =
 base_svm = as_learner(impute %>>% base_encode %>>% lrn("classif.svm", id = "base_svm"))
 base_gboost = as_learner(impute %>>% base_encode %>>% lrn("classif.xgboost", id = "base_gboost"))
 
-# Define pipeline for each model to be optimized
-kknn = as_learner(impute %>>% scale %>>% encode %>>% lrn("classif.kknn", k = to_tune(1, 20), distance = to_tune(1, 20), id = "kknn"))
-rpart = as_learner(impute %>>% scale %>>% encode %>>% lrn("classif.rpart", maxdepth = to_tune(1, 20), minbucket = to_tune(1, 20), id = "rpart"))
-ranger = as_learner(impute %>>% scale %>>% encode %>>% lrn("classif.ranger", num.trees = to_tune(50, 200), mtry = to_tune(1, 10), min.node.size = to_tune(1, 10), id = "ranger"))
-svm = as_learner(impute %>>% scale %>>% encode %>>% lrn("classif.svm", cost = to_tune(1e-1, 1e5), gamma = to_tune(1e-1, 1), id ="svm"))
-gboost = as_learner(impute %>>% scale %>>% encode %>>% lrn("classif.xgboost", eta = to_tune(1e-4, 1, logscale = TRUE), max_depth = to_tune(1, 20), id = "gboost"))
+# Define models to be optimized
+kknn = lrn("classif.kknn", k = to_tune(1, 20), distance = to_tune(1, 20), id = "kknn")
+rpart = lrn("classif.rpart", maxdepth = to_tune(1, 20), minbucket = to_tune(1, 20), id = "rpart")
+ranger = lrn("classif.ranger", num.trees = to_tune(50, 200), min.node.size = to_tune(1, 10), id = "ranger")
+svm = lrn("classif.svm", type = "C-classification", kernel = "radial", cost = to_tune(1e-1, 1e5), gamma = to_tune(1e-1, 1), id ="svm")
+gboost = lrn("classif.xgboost", eta = to_tune(1e-4, 1, logscale = TRUE), max_depth = to_tune(1, 20), id = "gboost")
 
-# Define a model stack for each pipeline
-kknn_stack = impute %>>% scale %>>% encode %>>%
-  gunion(list(base_rpart, base_ranger, base_svm, base_gboost)) %>>%
-  po("featureunion") %>>%
-  lrn("classif.kknn", k = to_tune(1, 20), distance = to_tune(1, 20), id = "kknn")
+# Define full pipeline for each model
+kknn_stack = as_learner(impute %>>% encode %>>% scale %>>%
+  gunion(list(
+    po("learner_cv", lrn("classif.kknn")),
+    po("learner_cv", lrn("classif.ranger")))) %>>%
+  po("featureunion") %>>% kknn)
+rpart_stack = as_learner(impute %>>% encode %>>% scale %>>%
+  gunion(list(
+    po("learner_cv", lrn("classif.kknn")),
+    po("learner_cv", lrn("classif.ranger")))) %>>%
+  po("featureunion") %>>% rpart)
+ranger_stack = as_learner(impute %>>% encode %>>% scale %>>%
+  gunion(list(
+    po("learner_cv", lrn("classif.kknn")),
+    po("learner_cv", lrn("classif.ranger")))) %>>%
+  po("featureunion") %>>% ranger)
+svm_stack = as_learner(impute %>>% encode %>>% scale %>>%
+  gunion(list(
+    po("learner_cv", lrn("classif.kknn")),
+    po("learner_cv", lrn("classif.ranger")))) %>>%
+  po("featureunion") %>>% svm)
+gboost_stack = as_learner(impute %>>% encode %>>% scale %>>%
+  gunion(list(
+    po("learner_cv", lrn("classif.kknn")),
+    po("learner_cv", lrn("classif.ranger")))) %>>%
+  po("featureunion") %>>% gboost)
 
-pipelines = list(kknn, rpart, ranger, svm, gboost)
+pipelines = list(kknn_stack, rpart_stack, ranger_stack, svm_stack)
 
 # Define a tuner with Bayesian optimization
 optimized_pipelines = lapply(pipelines, function(pipeline) {
   auto_tuner(
     tuner = tnr("mbo"),
     learner = pipeline,
-    resampling = rsmp("cv", folds = 10),
+    #resampling = rsmp("cv", folds = 10),
+    resampling = rsmp("holdout"),
     measure = msr("classif.ce"),
-    terminator = trm("evals", n_evals = 5)
+    terminator = trm("evals", n_evals = 2)
   )
 })
 
-learners = c(base_kknn, base_rpart, base_ranger, base_svm, optimized_pipelines)
+learners = c(base_kknn, base_rpart, base_ranger, base_svm, base_gboost, optimized_pipelines)
 
 # Benchmark all models to get the results
-cv = rsmp("cv", folds = 10)
-design = benchmark_grid(tasks, learners, cv)
+resamp = rsmp("holdout")
+design = benchmark_grid(tasks, learners, resamp)
 results = benchmark(design, store_models = TRUE)
-results$aggregate()[, .(task_id, learner_id, classif.ce)]
 
 # Optimal configuration for each model
 kknn_result = extract_inner_tuning_results(results)[,.(scale.robust, encode.method, kknn.k, kknn.distance, classif.ce)]
-kknn_result = kknn_opt[!is.na(kknn.k) & !is.na(kknn.distance)]
+kknn_result = kknn_result[!is.na(kknn.k) & !is.na(kknn.distance)]
 kknn_opt = kknn_result[which.min(classif.ce)]
 
 rpart_result = extract_inner_tuning_results(results)[,.(scale.robust, encode.method, rpart.maxdepth, rpart.minbucket, classif.ce)]
-rpart_result = rpart_results[!is.na(rpart.maxdepth) & !is.na(rpart.minbucket)]
+rpart_result = rpart_result[!is.na(rpart.maxdepth) & !is.na(rpart.minbucket)]
 rpart_opt = rpart_result[which.min(classif.ce)]
 
-ranger_result = extract_inner_tuning_results(results)[,.(scale.robust, encode.method, ranger.num.trees, ranger.mtry, ranger.min.node.size, classif.ce)]
-ranger_result = ranger_result[!is.na(ranger.num.trees) & !is.na(ranger.mtry) & !is.na(ranger.num.trees)]
+ranger_result = extract_inner_tuning_results(results)[,.(scale.robust, encode.method, ranger.num.trees, ranger.min.node.size, classif.ce)]
+ranger_result = ranger_result[!is.na(ranger.num.trees) & !is.na(ranger.num.trees)]
 ranger_opt = ranger_result[which.min(classif.ce)]
 
 svm_result = extract_inner_tuning_results(results)[,.(scale.robust, encode.method, svm.cost, svm.gamma, classif.ce)]
@@ -103,7 +124,8 @@ gboost_result = extract_inner_tuning_results(results)[,.(scale.robust, encode.me
 gboost_result = gboost_result[!is.na(gboost.eta) & !is.na(gboost.max_depth)]
 gboost_opt = gboost_result[which.min(classif.ce)]
 
-# Visualize the results
+# Compare models and visualize the results
+results$aggregate()[, .(task_id, learner_id, classif.ce)]
 autoplot(results, measure = msr("classif.ce"))
 
 
