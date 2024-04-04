@@ -36,35 +36,37 @@ tasks = list(wine_task, tumor_task)
 # Define preprocessing PipeOps
 impute = po("imputemode")
 scale = po("scale", robust = to_tune(c(TRUE, FALSE)))
-base_encode = po("encode")
 encode = po("encode", method = to_tune(c("one-hot", "treatment", "helmert", "poly", "sum")))
 
 # Define base learners
-base_kknn = as_learner(impute %>>% base_encode %>>% lrn("classif.kknn", id = "base_kknn"))
-base_rpart = as_learner(impute %>>% base_encode %>>% lrn("classif.rpart", id = "base_rpart"))
-base_ranger = as_learner(impute %>>% base_encode %>>% lrn("classif.ranger", id = "base_ranger"))
+base_kknn = as_learner(impute %>>% lrn("classif.kknn", id = "base_kknn"))
+base_rpart = as_learner(impute %>>% lrn("classif.rpart", id = "base_rpart"))
+base_ranger = as_learner(impute %>>% lrn("classif.ranger", id = "base_ranger"))
 
 # Define models to be optimized
-kknn = lrn("classif.kknn", k = to_tune(1, 20), distance = to_tune(1, 20), id = "kknn")
-rpart = lrn("classif.rpart", maxdepth = to_tune(1, 20), minbucket = to_tune(1, 20), id = "rpart")
-ranger = lrn("classif.ranger", num.trees = to_tune(50, 200), min.node.size = to_tune(1, 10), id = "ranger")
+kknn = lrn("classif.kknn", k = to_tune(1, 20), distance = to_tune(1, 20), predict_type = "prob", id = "kknn")
+rpart = lrn("classif.rpart", maxdepth = to_tune(1, 30), minbucket = to_tune(1, 50), id = "rpart")
+ranger = lrn("classif.ranger", num.trees = to_tune(100, 1000), mtry = to_tune(1, 8), min.node.size = to_tune(1, 10), predict_type = "prob", id = "ranger")
 
 # Define full pipeline for each model
 kknn_stack = as_learner(impute %>>% encode %>>% scale %>>%
   gunion(list(
-    po("learner_cv", lrn("classif.kknn")),
-    po("learner_cv", lrn("classif.ranger")))) %>>%
-  po("featureunion") %>>% kknn)
+    po("learner_cv", lrn("classif.kknn", predict_type = "prob")),
+    po("learner_cv", lrn("classif.ranger", predict_type = "prob")))) %>>%
+  po("featureunion") %>>% 
+    kknn, id = "opt_kknn")
 rpart_stack = as_learner(impute %>>% encode %>>% scale %>>%
   gunion(list(
-    po("learner_cv", lrn("classif.kknn")),
-    po("learner_cv", lrn("classif.ranger")))) %>>%
-  po("featureunion") %>>% rpart)
+   po("learner_cv", lrn("classif.kknn", predict_type = "prob")),
+   po("learner_cv", lrn("classif.ranger", predict_type = "prob")))) %>>%
+  po("featureunion") %>>%  
+    rpart, id = "opt_rpart")
 ranger_stack = as_learner(impute %>>% encode %>>% scale %>>%
   gunion(list(
-    po("learner_cv", lrn("classif.kknn")),
-    po("learner_cv", lrn("classif.ranger")))) %>>%
-  po("featureunion") %>>% ranger)
+    po("learner_cv", lrn("classif.kknn", predict_type = "prob")),
+    po("learner_cv", lrn("classif.ranger", predict_type = "prob")))) %>>%
+  po("featureunion") %>>% 
+    ranger, id = "opt_ranger")
 
 pipelines = list(kknn_stack, rpart_stack, ranger_stack)
 
@@ -97,16 +99,14 @@ rpart_result = rpart_result[!is.na(rpart.maxdepth) & !is.na(rpart.minbucket)]
 rpart_wine_opt = rpart_result[which.min(classif.ce) & task_id == "wine"]
 rpart_tumor_opt = rpart_result[which.min(classif.ce) & task_id == "tumor"]
 
-ranger_result = extract_inner_tuning_results(results)[,.(scale.robust, encode.method, ranger.num.trees, ranger.min.node.size, classif.ce, task_id)]
+ranger_result = extract_inner_tuning_results(results)[,.(scale.robust, encode.method, ranger.num.trees, ranger.mtry, ranger.min.node.size, classif.ce, task_id)]
 ranger_result = ranger_result[!is.na(ranger.num.trees) & !is.na(ranger.num.trees)]
 ranger_wine_opt = ranger_result[which.min(classif.ce) & task_id == "wine"]
 ranger_tumor_opt = ranger_result[which.min(classif.ce) & task_id == "tumor"]
 
 # Compare models and visualize the results
 results$aggregate()[, .(task_id, learner_id, classif.ce)]
-autoplot(results, measure = msr("classif.ce"))
-
-
+plot = autoplot(results, type = "boxplot")
 
 
 
